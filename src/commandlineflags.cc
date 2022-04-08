@@ -88,7 +88,7 @@ static std::string FlagToEnvVar(const char* flag) {
   for (size_t i = 0; i != flag_str.length(); ++i)
     env_var += static_cast<char>(::toupper(flag_str.c_str()[i]));
 
-  return env_var;
+  return "BENCHMARK_" + env_var;
 }
 
 }  // namespace

@@ -61,12 +61,6 @@ int AddCases(const char* base_name, std::initializer_list<TestCase> const& v) {
 
 }  // end namespace
 
-void BM_error_no_running(benchmark::State& state) {
-  state.SkipWithError("error message");
-}
-BENCHMARK(BM_error_no_running);
-ADD_CASES("BM_error_no_running", {{"", true, "error message"}});
-
 void BM_error_before_running(benchmark::State& state) {
   state.SkipWithError("error message");
   while (state.KeepRunning()) {

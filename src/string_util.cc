@@ -1,9 +1,6 @@
 #include "string_util.h"
 
 #include <array>
-#ifdef BENCHMARK_STL_ANDROID_GNUSTL
-#include <cerrno>
-#endif
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>

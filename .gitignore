@@ -60,7 +60,3 @@ CMakeSettings.json
 
 # Visual Studio Code cache/options directory
 .vscode/
-
-# Python build stuff
-dist/
-*.egg-info*

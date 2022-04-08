@@ -64,7 +64,7 @@ void BenchmarkReporter::PrintBasicContext(std::ostream *out,
     Out << "\n";
   }
 
-  if (CPUInfo::Scaling::ENABLED == info.scaling) {
+  if (info.scaling_enabled) {
     Out << "***WARNING*** CPU scaling is enabled, the benchmark "
            "real time measurements may be noisy and will incur extra "
            "overhead.\n";

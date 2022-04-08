@@ -284,10 +284,10 @@ void RunBenchmarks(const std::vector<BenchmarkInstance>& benchmarks,
 }
 
 // Disable deprecated warnings temporarily because we need to reference
-// CSVReporter but don't want to trigger -Werror=-Wdeprecated-declarations
+// CSVReporter but don't want to trigger -Werror=-Wdeprecated
 #ifdef __GNUC__
 #pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#pragma GCC diagnostic ignored "-Wdeprecated"
 #endif
 
 std::unique_ptr<BenchmarkReporter> CreateReporter(
