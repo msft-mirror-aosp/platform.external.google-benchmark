@@ -1,259 +1,834 @@
 
 #undef NDEBUG
-#include "benchmark/benchmark.h"
-#include "../src/check.h" // NOTE: check.h is for internal use only!
-#include "../src/re.h" // NOTE: re.h is for internal use only
-#include <cassert>
-#include <cstring>
-#include <iostream>
-#include <sstream>
-#include <vector>
 #include <utility>
 
-namespace {
-
-// ========================================================================= //
-// -------------------------- Testing Case --------------------------------- //
-// ========================================================================= //
-
-enum MatchRules {
-  MR_Default, // Skip non-matching lines until a match is found.
-  MR_Next    // Match must occur on the next line.
-};
-
-struct TestCase {
-  std::string regex;
-  int match_rule;
-
-  TestCase(std::string re, int rule = MR_Default) : regex(re), match_rule(rule) {}
-
-  void Check(std::stringstream& remaining_output) const {
-    benchmark::Regex r;
-    std::string err_str;
-    r.Init(regex, &err_str);
-    CHECK(err_str.empty()) << "Could not construct regex \"" << regex << "\""
-                           << " got Error: " << err_str;
-
-    std::string line;
-    while (remaining_output.eof() == false) {
-        CHECK(remaining_output.good());
-        std::getline(remaining_output, line);
-        if (r.Match(line)) return;
-        CHECK(match_rule != MR_Next) << "Expected line \"" << line
-                                     << "\" to match regex \"" << regex << "\"";
-    }
-
-    CHECK(remaining_output.eof() == false)
-        << "End of output reached before match for regex \"" << regex
-        << "\" was found";
-  }
-};
-
-std::vector<TestCase> ConsoleOutputTests;
-std::vector<TestCase> JSONOutputTests;
-std::vector<TestCase> CSVOutputTests;
-
-std::vector<TestCase> ConsoleErrorTests;
-std::vector<TestCase> JSONErrorTests;
-std::vector<TestCase> CSVErrorTests;
-
-// ========================================================================= //
-// -------------------------- Test Helpers --------------------------------- //
-// ========================================================================= //
-
-class TestReporter : public benchmark::BenchmarkReporter {
-public:
-  TestReporter(std::vector<benchmark::BenchmarkReporter*> reps)
-      : reporters_(reps)  {}
-
-  virtual bool ReportContext(const Context& context) {
-    bool last_ret = false;
-    bool first = true;
-    for (auto rep : reporters_) {
-      bool new_ret = rep->ReportContext(context);
-      CHECK(first || new_ret == last_ret)
-          << "Reports return different values for ReportContext";
-      first = false;
-      last_ret = new_ret;
-    }
-    return last_ret;
-  }
-
-  virtual void ReportRuns(const std::vector<Run>& report) {
-    for (auto rep : reporters_)
-      rep->ReportRuns(report);
-  }
-
-  virtual void Finalize() {
-      for (auto rep : reporters_)
-        rep->Finalize();
-  }
-
-private:
-  std::vector<benchmark::BenchmarkReporter*> reporters_;
-};
-
-
-#define CONCAT2(x, y) x##y
-#define CONCAT(x, y) CONCAT2(x, y)
-
-#define ADD_CASES(...) \
-    int CONCAT(dummy, __LINE__) = AddCases(__VA_ARGS__)
-
-int AddCases(std::vector<TestCase>* out, std::initializer_list<TestCase> const& v) {
-  for (auto const& TC : v)
-    out->push_back(TC);
-  return 0;
-}
-
-template <class First>
-std::string join(First f) { return f; }
-
-template <class First, class ...Args>
-std::string join(First f, Args&&... args) {
-    return std::string(std::move(f)) + "[ ]+" + join(std::forward<Args>(args)...);
-}
-
-std::string dec_re = "[0-9]+\\.[0-9]+";
-
-}  // end namespace
+#include "benchmark/benchmark.h"
+#include "output_test.h"
 
 // ========================================================================= //
 // ---------------------- Testing Prologue Output -------------------------- //
 // ========================================================================= //
 
-ADD_CASES(&ConsoleOutputTests, {
-    {join("^Benchmark", "Time", "CPU", "Iterations$"), MR_Next},
-    {"^[-]+$", MR_Next}
-});
-ADD_CASES(&CSVOutputTests, {
-  {"name,iterations,real_time,cpu_time,time_unit,bytes_per_second,items_per_second,"
-    "label,error_occurred,error_message"}
-});
+ADD_CASES(TC_ConsoleOut, {{"^[-]+$", MR_Next},
+                          {"^Benchmark %s Time %s CPU %s Iterations$", MR_Next},
+                          {"^[-]+$", MR_Next}});
+static int AddContextCases() {
+  AddCases(TC_ConsoleErr,
+           {
+               {"^%int-%int-%intT%int:%int:%int[-+]%int:%int$", MR_Default},
+               {"Running .*/reporter_output_test(\\.exe)?$", MR_Next},
+               {"Run on \\(%int X %float MHz CPU s?\\)", MR_Next},
+           });
+  AddCases(TC_JSONOut,
+           {{"^\\{", MR_Default},
+            {"\"context\":", MR_Next},
+            {"\"date\": \"", MR_Next},
+            {"\"host_name\":", MR_Next},
+            {"\"executable\": \".*(/|\\\\)reporter_output_test(\\.exe)?\",",
+             MR_Next},
+            {"\"num_cpus\": %int,$", MR_Next},
+            {"\"mhz_per_cpu\": %float,$", MR_Next},
+            {"\"caches\": \\[$", MR_Default}});
+  auto const& Info = benchmark::CPUInfo::Get();
+  auto const& Caches = Info.caches;
+  if (!Caches.empty()) {
+    AddCases(TC_ConsoleErr, {{"CPU Caches:$", MR_Next}});
+  }
+  for (size_t I = 0; I < Caches.size(); ++I) {
+    std::string num_caches_str =
+        Caches[I].num_sharing != 0 ? " \\(x%int\\)$" : "$";
+    AddCases(TC_ConsoleErr,
+             {{"L%int (Data|Instruction|Unified) %int KiB" + num_caches_str,
+               MR_Next}});
+    AddCases(TC_JSONOut, {{"\\{$", MR_Next},
+                          {"\"type\": \"", MR_Next},
+                          {"\"level\": %int,$", MR_Next},
+                          {"\"size\": %int,$", MR_Next},
+                          {"\"num_sharing\": %int$", MR_Next},
+                          {"}[,]{0,1}$", MR_Next}});
+  }
+  AddCases(TC_JSONOut, {{"],$"}});
+  auto const& LoadAvg = Info.load_avg;
+  if (!LoadAvg.empty()) {
+    AddCases(TC_ConsoleErr,
+             {{"Load Average: (%float, ){0,2}%float$", MR_Next}});
+  }
+  AddCases(TC_JSONOut, {{"\"load_avg\": \\[(%float,?){0,3}],$", MR_Next}});
+  return 0;
+}
+int dummy_register = AddContextCases();
+ADD_CASES(TC_CSVOut, {{"%csv_header"}});
 
 // ========================================================================= //
 // ------------------------ Testing Basic Output --------------------------- //
 // ========================================================================= //
 
 void BM_basic(benchmark::State& state) {
-  while (state.KeepRunning()) {}
+  for (auto _ : state) {
+  }
 }
 BENCHMARK(BM_basic);
 
-ADD_CASES(&ConsoleOutputTests, {
-    {"^BM_basic[ ]+[0-9]{1,5} ns[ ]+[0-9]{1,5} ns[ ]+[0-9]+$"}
-});
-ADD_CASES(&JSONOutputTests, {
-    {"\"name\": \"BM_basic\",$"},
-    {"\"iterations\": [0-9]+,$", MR_Next},
-    {"\"real_time\": [0-9]{1,5},$", MR_Next},
-    {"\"cpu_time\": [0-9]{1,5},$", MR_Next},
-    {"\"time_unit\": \"ns\"$", MR_Next},
-    {"}", MR_Next}
-});
-ADD_CASES(&CSVOutputTests, {
-    {"^\"BM_basic\",[0-9]+," + dec_re + "," + dec_re + ",ns,,,,,$"}
-});
+ADD_CASES(TC_ConsoleOut, {{"^BM_basic %console_report$"}});
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_basic\",$"},
+                       {"\"run_name\": \"BM_basic\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 0,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"iterations\": %int,$", MR_Next},
+                       {"\"real_time\": %float,$", MR_Next},
+                       {"\"cpu_time\": %float,$", MR_Next},
+                       {"\"time_unit\": \"ns\"$", MR_Next},
+                       {"}", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_basic\",%csv_report$"}});
+
+// ========================================================================= //
+// ------------------------ Testing Bytes per Second Output ---------------- //
+// ========================================================================= //
+
+void BM_bytes_per_second(benchmark::State& state) {
+  for (auto _ : state) {
+    // This test requires a non-zero CPU time to avoid divide-by-zero
+    benchmark::DoNotOptimize(state.iterations());
+  }
+  state.SetBytesProcessed(1);
+}
+BENCHMARK(BM_bytes_per_second);
+
+ADD_CASES(TC_ConsoleOut, {{"^BM_bytes_per_second %console_report "
+                           "bytes_per_second=%float[kM]{0,1}/s$"}});
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_bytes_per_second\",$"},
+                       {"\"run_name\": \"BM_bytes_per_second\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 0,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"iterations\": %int,$", MR_Next},
+                       {"\"real_time\": %float,$", MR_Next},
+                       {"\"cpu_time\": %float,$", MR_Next},
+                       {"\"time_unit\": \"ns\",$", MR_Next},
+                       {"\"bytes_per_second\": %float$", MR_Next},
+                       {"}", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_bytes_per_second\",%csv_bytes_report$"}});
+
+// ========================================================================= //
+// ------------------------ Testing Items per Second Output ---------------- //
+// ========================================================================= //
+
+void BM_items_per_second(benchmark::State& state) {
+  for (auto _ : state) {
+    // This test requires a non-zero CPU time to avoid divide-by-zero
+    benchmark::DoNotOptimize(state.iterations());
+  }
+  state.SetItemsProcessed(1);
+}
+BENCHMARK(BM_items_per_second);
+
+ADD_CASES(TC_ConsoleOut, {{"^BM_items_per_second %console_report "
+                           "items_per_second=%float[kM]{0,1}/s$"}});
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_items_per_second\",$"},
+                       {"\"run_name\": \"BM_items_per_second\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 0,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"iterations\": %int,$", MR_Next},
+                       {"\"real_time\": %float,$", MR_Next},
+                       {"\"cpu_time\": %float,$", MR_Next},
+                       {"\"time_unit\": \"ns\",$", MR_Next},
+                       {"\"items_per_second\": %float$", MR_Next},
+                       {"}", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_items_per_second\",%csv_items_report$"}});
+
+// ========================================================================= //
+// ------------------------ Testing Label Output --------------------------- //
+// ========================================================================= //
+
+void BM_label(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+  state.SetLabel("some label");
+}
+BENCHMARK(BM_label);
+
+ADD_CASES(TC_ConsoleOut, {{"^BM_label %console_report some label$"}});
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_label\",$"},
+                       {"\"run_name\": \"BM_label\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 0,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"iterations\": %int,$", MR_Next},
+                       {"\"real_time\": %float,$", MR_Next},
+                       {"\"cpu_time\": %float,$", MR_Next},
+                       {"\"time_unit\": \"ns\",$", MR_Next},
+                       {"\"label\": \"some label\"$", MR_Next},
+                       {"}", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_label\",%csv_label_report_begin\"some "
+                       "label\"%csv_label_report_end$"}});
+
+// ========================================================================= //
+// ------------------------ Testing Time Label Output ---------------------- //
+// ========================================================================= //
+
+void BM_time_label_nanosecond(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_time_label_nanosecond)->Unit(benchmark::kNanosecond);
+
+ADD_CASES(TC_ConsoleOut, {{"^BM_time_label_nanosecond %console_report$"}});
+ADD_CASES(TC_JSONOut,
+          {{"\"name\": \"BM_time_label_nanosecond\",$"},
+           {"\"run_name\": \"BM_time_label_nanosecond\",$", MR_Next},
+           {"\"run_type\": \"iteration\",$", MR_Next},
+           {"\"repetitions\": 0,$", MR_Next},
+           {"\"repetition_index\": 0,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next},
+           {"\"iterations\": %int,$", MR_Next},
+           {"\"real_time\": %float,$", MR_Next},
+           {"\"cpu_time\": %float,$", MR_Next},
+           {"\"time_unit\": \"ns\"$", MR_Next},
+           {"}", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_time_label_nanosecond\",%csv_report$"}});
+
+void BM_time_label_microsecond(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_time_label_microsecond)->Unit(benchmark::kMicrosecond);
+
+ADD_CASES(TC_ConsoleOut, {{"^BM_time_label_microsecond %console_us_report$"}});
+ADD_CASES(TC_JSONOut,
+          {{"\"name\": \"BM_time_label_microsecond\",$"},
+           {"\"run_name\": \"BM_time_label_microsecond\",$", MR_Next},
+           {"\"run_type\": \"iteration\",$", MR_Next},
+           {"\"repetitions\": 0,$", MR_Next},
+           {"\"repetition_index\": 0,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next},
+           {"\"iterations\": %int,$", MR_Next},
+           {"\"real_time\": %float,$", MR_Next},
+           {"\"cpu_time\": %float,$", MR_Next},
+           {"\"time_unit\": \"us\"$", MR_Next},
+           {"}", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_time_label_microsecond\",%csv_us_report$"}});
+
+void BM_time_label_millisecond(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_time_label_millisecond)->Unit(benchmark::kMillisecond);
+
+ADD_CASES(TC_ConsoleOut, {{"^BM_time_label_millisecond %console_ms_report$"}});
+ADD_CASES(TC_JSONOut,
+          {{"\"name\": \"BM_time_label_millisecond\",$"},
+           {"\"run_name\": \"BM_time_label_millisecond\",$", MR_Next},
+           {"\"run_type\": \"iteration\",$", MR_Next},
+           {"\"repetitions\": 0,$", MR_Next},
+           {"\"repetition_index\": 0,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next},
+           {"\"iterations\": %int,$", MR_Next},
+           {"\"real_time\": %float,$", MR_Next},
+           {"\"cpu_time\": %float,$", MR_Next},
+           {"\"time_unit\": \"ms\"$", MR_Next},
+           {"}", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_time_label_millisecond\",%csv_ms_report$"}});
+
+void BM_time_label_second(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_time_label_second)->Unit(benchmark::kSecond);
+
+ADD_CASES(TC_ConsoleOut, {{"^BM_time_label_second %console_s_report$"}});
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_time_label_second\",$"},
+                       {"\"run_name\": \"BM_time_label_second\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 0,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"iterations\": %int,$", MR_Next},
+                       {"\"real_time\": %float,$", MR_Next},
+                       {"\"cpu_time\": %float,$", MR_Next},
+                       {"\"time_unit\": \"s\"$", MR_Next},
+                       {"}", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_time_label_second\",%csv_s_report$"}});
 
 // ========================================================================= //
 // ------------------------ Testing Error Output --------------------------- //
 // ========================================================================= //
 
 void BM_error(benchmark::State& state) {
-    state.SkipWithError("message");
-    while(state.KeepRunning()) {}
+  state.SkipWithError("message");
+  for (auto _ : state) {
+  }
 }
 BENCHMARK(BM_error);
-ADD_CASES(&ConsoleOutputTests, {
-    {"^BM_error[ ]+ERROR OCCURRED: 'message'$"}
-});
-ADD_CASES(&JSONOutputTests, {
-    {"\"name\": \"BM_error\",$"},
-    {"\"error_occurred\": true,$", MR_Next},
-    {"\"error_message\": \"message\",$", MR_Next}
-});
+ADD_CASES(TC_ConsoleOut, {{"^BM_error[ ]+ERROR OCCURRED: 'message'$"}});
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_error\",$"},
+                       {"\"run_name\": \"BM_error\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 0,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"error_occurred\": true,$", MR_Next},
+                       {"\"error_message\": \"message\",$", MR_Next}});
 
-ADD_CASES(&CSVOutputTests, {
-    {"^\"BM_error\",,,,,,,,true,\"message\"$"}
-});
+ADD_CASES(TC_CSVOut, {{"^\"BM_error\",,,,,,,,true,\"message\"$"}});
 
+// ========================================================================= //
+// ------------------------ Testing No Arg Name Output -----------------------
+// //
+// ========================================================================= //
+
+void BM_no_arg_name(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_no_arg_name)->Arg(3);
+ADD_CASES(TC_ConsoleOut, {{"^BM_no_arg_name/3 %console_report$"}});
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_no_arg_name/3\",$"},
+                       {"\"run_name\": \"BM_no_arg_name/3\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 0,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_no_arg_name/3\",%csv_report$"}});
+
+// ========================================================================= //
+// ------------------------ Testing Arg Name Output ----------------------- //
+// ========================================================================= //
+
+void BM_arg_name(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_arg_name)->ArgName("first")->Arg(3);
+ADD_CASES(TC_ConsoleOut, {{"^BM_arg_name/first:3 %console_report$"}});
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_arg_name/first:3\",$"},
+                       {"\"run_name\": \"BM_arg_name/first:3\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 0,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_arg_name/first:3\",%csv_report$"}});
+
+// ========================================================================= //
+// ------------------------ Testing Arg Names Output ----------------------- //
+// ========================================================================= //
+
+void BM_arg_names(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_arg_names)->Args({2, 5, 4})->ArgNames({"first", "", "third"});
+ADD_CASES(TC_ConsoleOut,
+          {{"^BM_arg_names/first:2/5/third:4 %console_report$"}});
+ADD_CASES(TC_JSONOut,
+          {{"\"name\": \"BM_arg_names/first:2/5/third:4\",$"},
+           {"\"run_name\": \"BM_arg_names/first:2/5/third:4\",$", MR_Next},
+           {"\"run_type\": \"iteration\",$", MR_Next},
+           {"\"repetitions\": 0,$", MR_Next},
+           {"\"repetition_index\": 0,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_arg_names/first:2/5/third:4\",%csv_report$"}});
+
+// ========================================================================= //
+// ------------------------ Testing Big Args Output ------------------------ //
+// ========================================================================= //
+
+void BM_BigArgs(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_BigArgs)->RangeMultiplier(2)->Range(1U << 30U, 1U << 31U);
+ADD_CASES(TC_ConsoleOut, {{"^BM_BigArgs/1073741824 %console_report$"},
+                          {"^BM_BigArgs/2147483648 %console_report$"}});
 
 // ========================================================================= //
 // ----------------------- Testing Complexity Output ----------------------- //
 // ========================================================================= //
 
 void BM_Complexity_O1(benchmark::State& state) {
-  while (state.KeepRunning()) {
+  for (auto _ : state) {
+    // This test requires a non-zero CPU time to avoid divide-by-zero
+    benchmark::DoNotOptimize(state.iterations());
   }
-  state.SetComplexityN(state.range_x());
+  state.SetComplexityN(state.range(0));
 }
-BENCHMARK(BM_Complexity_O1)->Range(1, 1<<18)->Complexity(benchmark::o1);
+BENCHMARK(BM_Complexity_O1)->Range(1, 1 << 18)->Complexity(benchmark::o1);
+SET_SUBSTITUTIONS({{"%bigOStr", "[ ]* %float \\([0-9]+\\)"},
+                   {"%RMS", "[ ]*[0-9]+ %"}});
+ADD_CASES(TC_ConsoleOut, {{"^BM_Complexity_O1_BigO %bigOStr %bigOStr[ ]*$"},
+                          {"^BM_Complexity_O1_RMS %RMS %RMS[ ]*$"}});
 
-std::string bigOStr = "[0-9]+\\.[0-9]+ \\([0-9]+\\)";
+// ========================================================================= //
+// ----------------------- Testing Aggregate Output ------------------------ //
+// ========================================================================= //
 
-ADD_CASES(&ConsoleOutputTests, {
-   {join("^BM_Complexity_O1_BigO", bigOStr, bigOStr) + "[ ]*$"},
-   {join("^BM_Complexity_O1_RMS", "[0-9]+ %", "[0-9]+ %") + "[ ]*$"}
-});
+// Test that non-aggregate data is printed by default
+void BM_Repeat(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+// need two repetitions min to be able to output any aggregate output
+BENCHMARK(BM_Repeat)->Repetitions(2);
+ADD_CASES(TC_ConsoleOut,
+          {{"^BM_Repeat/repeats:2 %console_report$"},
+           {"^BM_Repeat/repeats:2 %console_report$"},
+           {"^BM_Repeat/repeats:2_mean %console_time_only_report [ ]*2$"},
+           {"^BM_Repeat/repeats:2_median %console_time_only_report [ ]*2$"},
+           {"^BM_Repeat/repeats:2_stddev %console_time_only_report [ ]*2$"}});
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:2\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:2\"", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 2,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:2\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:2\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 2,$", MR_Next},
+                       {"\"repetition_index\": 1,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:2_mean\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:2\",$", MR_Next},
+                       {"\"run_type\": \"aggregate\",$", MR_Next},
+                       {"\"repetitions\": 2,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"aggregate_name\": \"mean\",$", MR_Next},
+                       {"\"iterations\": 2,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:2_median\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:2\",$", MR_Next},
+                       {"\"run_type\": \"aggregate\",$", MR_Next},
+                       {"\"repetitions\": 2,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"aggregate_name\": \"median\",$", MR_Next},
+                       {"\"iterations\": 2,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:2_stddev\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:2\",$", MR_Next},
+                       {"\"run_type\": \"aggregate\",$", MR_Next},
+                       {"\"repetitions\": 2,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"aggregate_name\": \"stddev\",$", MR_Next},
+                       {"\"iterations\": 2,$", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_Repeat/repeats:2\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:2\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:2_mean\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:2_median\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:2_stddev\",%csv_report$"}});
+// but for two repetitions, mean and median is the same, so let's repeat..
+BENCHMARK(BM_Repeat)->Repetitions(3);
+ADD_CASES(TC_ConsoleOut,
+          {{"^BM_Repeat/repeats:3 %console_report$"},
+           {"^BM_Repeat/repeats:3 %console_report$"},
+           {"^BM_Repeat/repeats:3 %console_report$"},
+           {"^BM_Repeat/repeats:3_mean %console_time_only_report [ ]*3$"},
+           {"^BM_Repeat/repeats:3_median %console_time_only_report [ ]*3$"},
+           {"^BM_Repeat/repeats:3_stddev %console_time_only_report [ ]*3$"}});
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:3\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 3,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:3\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 3,$", MR_Next},
+                       {"\"repetition_index\": 1,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:3\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 3,$", MR_Next},
+                       {"\"repetition_index\": 2,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:3_mean\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                       {"\"run_type\": \"aggregate\",$", MR_Next},
+                       {"\"repetitions\": 3,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"aggregate_name\": \"mean\",$", MR_Next},
+                       {"\"iterations\": 3,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:3_median\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                       {"\"run_type\": \"aggregate\",$", MR_Next},
+                       {"\"repetitions\": 3,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"aggregate_name\": \"median\",$", MR_Next},
+                       {"\"iterations\": 3,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:3_stddev\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:3\",$", MR_Next},
+                       {"\"run_type\": \"aggregate\",$", MR_Next},
+                       {"\"repetitions\": 3,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"aggregate_name\": \"stddev\",$", MR_Next},
+                       {"\"iterations\": 3,$", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_Repeat/repeats:3\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:3\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:3\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:3_mean\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:3_median\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:3_stddev\",%csv_report$"}});
+// median differs between even/odd number of repetitions, so just to be sure
+BENCHMARK(BM_Repeat)->Repetitions(4);
+ADD_CASES(TC_ConsoleOut,
+          {{"^BM_Repeat/repeats:4 %console_report$"},
+           {"^BM_Repeat/repeats:4 %console_report$"},
+           {"^BM_Repeat/repeats:4 %console_report$"},
+           {"^BM_Repeat/repeats:4 %console_report$"},
+           {"^BM_Repeat/repeats:4_mean %console_time_only_report [ ]*4$"},
+           {"^BM_Repeat/repeats:4_median %console_time_only_report [ ]*4$"},
+           {"^BM_Repeat/repeats:4_stddev %console_time_only_report [ ]*4$"}});
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_Repeat/repeats:4\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 4,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:4\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 4,$", MR_Next},
+                       {"\"repetition_index\": 1,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:4\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 4,$", MR_Next},
+                       {"\"repetition_index\": 2,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:4\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 4,$", MR_Next},
+                       {"\"repetition_index\": 3,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:4_mean\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                       {"\"run_type\": \"aggregate\",$", MR_Next},
+                       {"\"repetitions\": 4,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"aggregate_name\": \"mean\",$", MR_Next},
+                       {"\"iterations\": 4,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:4_median\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                       {"\"run_type\": \"aggregate\",$", MR_Next},
+                       {"\"repetitions\": 4,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"aggregate_name\": \"median\",$", MR_Next},
+                       {"\"iterations\": 4,$", MR_Next},
+                       {"\"name\": \"BM_Repeat/repeats:4_stddev\",$"},
+                       {"\"run_name\": \"BM_Repeat/repeats:4\",$", MR_Next},
+                       {"\"run_type\": \"aggregate\",$", MR_Next},
+                       {"\"repetitions\": 4,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"aggregate_name\": \"stddev\",$", MR_Next},
+                       {"\"iterations\": 4,$", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_Repeat/repeats:4\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:4\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:4\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:4\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:4_mean\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:4_median\",%csv_report$"},
+                      {"^\"BM_Repeat/repeats:4_stddev\",%csv_report$"}});
 
+// Test that a non-repeated test still prints non-aggregate results even when
+// only-aggregate reports have been requested
+void BM_RepeatOnce(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_RepeatOnce)->Repetitions(1)->ReportAggregatesOnly();
+ADD_CASES(TC_ConsoleOut, {{"^BM_RepeatOnce/repeats:1 %console_report$"}});
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_RepeatOnce/repeats:1\",$"},
+                       {"\"run_name\": \"BM_RepeatOnce/repeats:1\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 1,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next}});
+ADD_CASES(TC_CSVOut, {{"^\"BM_RepeatOnce/repeats:1\",%csv_report$"}});
+
+// Test that non-aggregate data is not reported
+void BM_SummaryRepeat(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_SummaryRepeat)->Repetitions(3)->ReportAggregatesOnly();
+ADD_CASES(
+    TC_ConsoleOut,
+    {{".*BM_SummaryRepeat/repeats:3 ", MR_Not},
+     {"^BM_SummaryRepeat/repeats:3_mean %console_time_only_report [ ]*3$"},
+     {"^BM_SummaryRepeat/repeats:3_median %console_time_only_report [ ]*3$"},
+     {"^BM_SummaryRepeat/repeats:3_stddev %console_time_only_report [ ]*3$"}});
+ADD_CASES(TC_JSONOut,
+          {{".*BM_SummaryRepeat/repeats:3 ", MR_Not},
+           {"\"name\": \"BM_SummaryRepeat/repeats:3_mean\",$"},
+           {"\"run_name\": \"BM_SummaryRepeat/repeats:3\",$", MR_Next},
+           {"\"run_type\": \"aggregate\",$", MR_Next},
+           {"\"repetitions\": 3,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next},
+           {"\"aggregate_name\": \"mean\",$", MR_Next},
+           {"\"iterations\": 3,$", MR_Next},
+           {"\"name\": \"BM_SummaryRepeat/repeats:3_median\",$"},
+           {"\"run_name\": \"BM_SummaryRepeat/repeats:3\",$", MR_Next},
+           {"\"run_type\": \"aggregate\",$", MR_Next},
+           {"\"repetitions\": 3,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next},
+           {"\"aggregate_name\": \"median\",$", MR_Next},
+           {"\"iterations\": 3,$", MR_Next},
+           {"\"name\": \"BM_SummaryRepeat/repeats:3_stddev\",$"},
+           {"\"run_name\": \"BM_SummaryRepeat/repeats:3\",$", MR_Next},
+           {"\"run_type\": \"aggregate\",$", MR_Next},
+           {"\"repetitions\": 3,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next},
+           {"\"aggregate_name\": \"stddev\",$", MR_Next},
+           {"\"iterations\": 3,$", MR_Next}});
+ADD_CASES(TC_CSVOut, {{".*BM_SummaryRepeat/repeats:3 ", MR_Not},
+                      {"^\"BM_SummaryRepeat/repeats:3_mean\",%csv_report$"},
+                      {"^\"BM_SummaryRepeat/repeats:3_median\",%csv_report$"},
+                      {"^\"BM_SummaryRepeat/repeats:3_stddev\",%csv_report$"}});
+
+// Test that non-aggregate data is not displayed.
+// NOTE: this test is kinda bad. we are only testing the display output.
+//       But we don't check that the file output still contains everything...
+void BM_SummaryDisplay(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_SummaryDisplay)->Repetitions(2)->DisplayAggregatesOnly();
+ADD_CASES(
+    TC_ConsoleOut,
+    {{".*BM_SummaryDisplay/repeats:2 ", MR_Not},
+     {"^BM_SummaryDisplay/repeats:2_mean %console_time_only_report [ ]*2$"},
+     {"^BM_SummaryDisplay/repeats:2_median %console_time_only_report [ ]*2$"},
+     {"^BM_SummaryDisplay/repeats:2_stddev %console_time_only_report [ ]*2$"}});
+ADD_CASES(TC_JSONOut,
+          {{".*BM_SummaryDisplay/repeats:2 ", MR_Not},
+           {"\"name\": \"BM_SummaryDisplay/repeats:2_mean\",$"},
+           {"\"run_name\": \"BM_SummaryDisplay/repeats:2\",$", MR_Next},
+           {"\"run_type\": \"aggregate\",$", MR_Next},
+           {"\"repetitions\": 2,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next},
+           {"\"aggregate_name\": \"mean\",$", MR_Next},
+           {"\"iterations\": 2,$", MR_Next},
+           {"\"name\": \"BM_SummaryDisplay/repeats:2_median\",$"},
+           {"\"run_name\": \"BM_SummaryDisplay/repeats:2\",$", MR_Next},
+           {"\"run_type\": \"aggregate\",$", MR_Next},
+           {"\"repetitions\": 2,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next},
+           {"\"aggregate_name\": \"median\",$", MR_Next},
+           {"\"iterations\": 2,$", MR_Next},
+           {"\"name\": \"BM_SummaryDisplay/repeats:2_stddev\",$"},
+           {"\"run_name\": \"BM_SummaryDisplay/repeats:2\",$", MR_Next},
+           {"\"run_type\": \"aggregate\",$", MR_Next},
+           {"\"repetitions\": 2,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next},
+           {"\"aggregate_name\": \"stddev\",$", MR_Next},
+           {"\"iterations\": 2,$", MR_Next}});
+ADD_CASES(TC_CSVOut,
+          {{".*BM_SummaryDisplay/repeats:2 ", MR_Not},
+           {"^\"BM_SummaryDisplay/repeats:2_mean\",%csv_report$"},
+           {"^\"BM_SummaryDisplay/repeats:2_median\",%csv_report$"},
+           {"^\"BM_SummaryDisplay/repeats:2_stddev\",%csv_report$"}});
+
+// Test repeats with custom time unit.
+void BM_RepeatTimeUnit(benchmark::State& state) {
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_RepeatTimeUnit)
+    ->Repetitions(3)
+    ->ReportAggregatesOnly()
+    ->Unit(benchmark::kMicrosecond);
+ADD_CASES(
+    TC_ConsoleOut,
+    {{".*BM_RepeatTimeUnit/repeats:3 ", MR_Not},
+     {"^BM_RepeatTimeUnit/repeats:3_mean %console_us_time_only_report [ ]*3$"},
+     {"^BM_RepeatTimeUnit/repeats:3_median %console_us_time_only_report [ "
+      "]*3$"},
+     {"^BM_RepeatTimeUnit/repeats:3_stddev %console_us_time_only_report [ "
+      "]*3$"}});
+ADD_CASES(TC_JSONOut,
+          {{".*BM_RepeatTimeUnit/repeats:3 ", MR_Not},
+           {"\"name\": \"BM_RepeatTimeUnit/repeats:3_mean\",$"},
+           {"\"run_name\": \"BM_RepeatTimeUnit/repeats:3\",$", MR_Next},
+           {"\"run_type\": \"aggregate\",$", MR_Next},
+           {"\"repetitions\": 3,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next},
+           {"\"aggregate_name\": \"mean\",$", MR_Next},
+           {"\"iterations\": 3,$", MR_Next},
+           {"\"time_unit\": \"us\",?$"},
+           {"\"name\": \"BM_RepeatTimeUnit/repeats:3_median\",$"},
+           {"\"run_name\": \"BM_RepeatTimeUnit/repeats:3\",$", MR_Next},
+           {"\"run_type\": \"aggregate\",$", MR_Next},
+           {"\"repetitions\": 3,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next},
+           {"\"aggregate_name\": \"median\",$", MR_Next},
+           {"\"iterations\": 3,$", MR_Next},
+           {"\"time_unit\": \"us\",?$"},
+           {"\"name\": \"BM_RepeatTimeUnit/repeats:3_stddev\",$"},
+           {"\"run_name\": \"BM_RepeatTimeUnit/repeats:3\",$", MR_Next},
+           {"\"run_type\": \"aggregate\",$", MR_Next},
+           {"\"repetitions\": 3,$", MR_Next},
+           {"\"threads\": 1,$", MR_Next},
+           {"\"aggregate_name\": \"stddev\",$", MR_Next},
+           {"\"iterations\": 3,$", MR_Next},
+           {"\"time_unit\": \"us\",?$"}});
+ADD_CASES(TC_CSVOut,
+          {{".*BM_RepeatTimeUnit/repeats:3 ", MR_Not},
+           {"^\"BM_RepeatTimeUnit/repeats:3_mean\",%csv_us_report$"},
+           {"^\"BM_RepeatTimeUnit/repeats:3_median\",%csv_us_report$"},
+           {"^\"BM_RepeatTimeUnit/repeats:3_stddev\",%csv_us_report$"}});
+
+// ========================================================================= //
+// -------------------- Testing user-provided statistics ------------------- //
+// ========================================================================= //
+
+const auto UserStatistics = [](const std::vector<double>& v) {
+  return v.back();
+};
+void BM_UserStats(benchmark::State& state) {
+  for (auto _ : state) {
+    state.SetIterationTime(150 / 10e8);
+  }
+}
+// clang-format off
+BENCHMARK(BM_UserStats)
+  ->Repetitions(3)
+  ->Iterations(5)
+  ->UseManualTime()
+  ->ComputeStatistics("", UserStatistics);
+// clang-format on
+
+// check that user-provided stats is calculated, and is after the default-ones
+// empty string as name is intentional, it would sort before anything else
+ADD_CASES(TC_ConsoleOut, {{"^BM_UserStats/iterations:5/repeats:3/manual_time [ "
+                           "]* 150 ns %time [ ]*5$"},
+                          {"^BM_UserStats/iterations:5/repeats:3/manual_time [ "
+                           "]* 150 ns %time [ ]*5$"},
+                          {"^BM_UserStats/iterations:5/repeats:3/manual_time [ "
+                           "]* 150 ns %time [ ]*5$"},
+                          {"^BM_UserStats/iterations:5/repeats:3/"
+                           "manual_time_mean [ ]* 150 ns %time [ ]*3$"},
+                          {"^BM_UserStats/iterations:5/repeats:3/"
+                           "manual_time_median [ ]* 150 ns %time [ ]*3$"},
+                          {"^BM_UserStats/iterations:5/repeats:3/"
+                           "manual_time_stddev [ ]* 0.000 ns %time [ ]*3$"},
+                          {"^BM_UserStats/iterations:5/repeats:3/manual_time_ "
+                           "[ ]* 150 ns %time [ ]*3$"}});
+ADD_CASES(
+    TC_JSONOut,
+    {{"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$"},
+     {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+      MR_Next},
+     {"\"run_type\": \"iteration\",$", MR_Next},
+     {"\"repetitions\": 3,$", MR_Next},
+     {"\"repetition_index\": 0,$", MR_Next},
+     {"\"threads\": 1,$", MR_Next},
+     {"\"iterations\": 5,$", MR_Next},
+     {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+     {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$"},
+     {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+      MR_Next},
+     {"\"run_type\": \"iteration\",$", MR_Next},
+     {"\"repetitions\": 3,$", MR_Next},
+     {"\"repetition_index\": 1,$", MR_Next},
+     {"\"threads\": 1,$", MR_Next},
+     {"\"iterations\": 5,$", MR_Next},
+     {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+     {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$"},
+     {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+      MR_Next},
+     {"\"run_type\": \"iteration\",$", MR_Next},
+     {"\"repetitions\": 3,$", MR_Next},
+     {"\"repetition_index\": 2,$", MR_Next},
+     {"\"threads\": 1,$", MR_Next},
+     {"\"iterations\": 5,$", MR_Next},
+     {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+     {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time_mean\",$"},
+     {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+      MR_Next},
+     {"\"run_type\": \"aggregate\",$", MR_Next},
+     {"\"repetitions\": 3,$", MR_Next},
+     {"\"threads\": 1,$", MR_Next},
+     {"\"aggregate_name\": \"mean\",$", MR_Next},
+     {"\"iterations\": 3,$", MR_Next},
+     {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+     {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time_median\",$"},
+     {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+      MR_Next},
+     {"\"run_type\": \"aggregate\",$", MR_Next},
+     {"\"repetitions\": 3,$", MR_Next},
+     {"\"threads\": 1,$", MR_Next},
+     {"\"aggregate_name\": \"median\",$", MR_Next},
+     {"\"iterations\": 3,$", MR_Next},
+     {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next},
+     {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time_stddev\",$"},
+     {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+      MR_Next},
+     {"\"run_type\": \"aggregate\",$", MR_Next},
+     {"\"repetitions\": 3,$", MR_Next},
+     {"\"threads\": 1,$", MR_Next},
+     {"\"aggregate_name\": \"stddev\",$", MR_Next},
+     {"\"iterations\": 3,$", MR_Next},
+     {"\"real_time\": %float,$", MR_Next},
+     {"\"name\": \"BM_UserStats/iterations:5/repeats:3/manual_time_\",$"},
+     {"\"run_name\": \"BM_UserStats/iterations:5/repeats:3/manual_time\",$",
+      MR_Next},
+     {"\"run_type\": \"aggregate\",$", MR_Next},
+     {"\"repetitions\": 3,$", MR_Next},
+     {"\"threads\": 1,$", MR_Next},
+     {"\"aggregate_name\": \"\",$", MR_Next},
+     {"\"iterations\": 3,$", MR_Next},
+     {"\"real_time\": 1\\.5(0)*e\\+(0)*2,$", MR_Next}});
+ADD_CASES(
+    TC_CSVOut,
+    {{"^\"BM_UserStats/iterations:5/repeats:3/manual_time\",%csv_report$"},
+     {"^\"BM_UserStats/iterations:5/repeats:3/manual_time\",%csv_report$"},
+     {"^\"BM_UserStats/iterations:5/repeats:3/manual_time\",%csv_report$"},
+     {"^\"BM_UserStats/iterations:5/repeats:3/manual_time_mean\",%csv_report$"},
+     {"^\"BM_UserStats/iterations:5/repeats:3/"
+      "manual_time_median\",%csv_report$"},
+     {"^\"BM_UserStats/iterations:5/repeats:3/"
+      "manual_time_stddev\",%csv_report$"},
+     {"^\"BM_UserStats/iterations:5/repeats:3/manual_time_\",%csv_report$"}});
+
+// ========================================================================= //
+// ------------------------- Testing StrEscape JSON ------------------------ //
+// ========================================================================= //
+#if 0  // enable when csv testing code correctly handles multi-line fields
+void BM_JSON_Format(benchmark::State& state) {
+  state.SkipWithError("val\b\f\n\r\t\\\"with\"es,capes");
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_JSON_Format);
+ADD_CASES(TC_JSONOut, {{"\"name\": \"BM_JSON_Format\",$"},
+                       {"\"run_name\": \"BM_JSON_Format\",$", MR_Next},
+                       {"\"run_type\": \"iteration\",$", MR_Next},
+                       {"\"repetitions\": 0,$", MR_Next},
+                       {"\"repetition_index\": 0,$", MR_Next},
+                       {"\"threads\": 1,$", MR_Next},
+                       {"\"error_occurred\": true,$", MR_Next},
+                       {R"("error_message": "val\\b\\f\\n\\r\\t\\\\\\"with\\"es,capes",$)", MR_Next}});
+#endif
+// ========================================================================= //
+// -------------------------- Testing CsvEscape ---------------------------- //
+// ========================================================================= //
+
+void BM_CSV_Format(benchmark::State& state) {
+  state.SkipWithError("\"freedom\"");
+  for (auto _ : state) {
+  }
+}
+BENCHMARK(BM_CSV_Format);
+ADD_CASES(TC_CSVOut, {{"^\"BM_CSV_Format\",,,,,,,,true,\"\"\"freedom\"\"\"$"}});
 
 // ========================================================================= //
 // --------------------------- TEST CASES END ------------------------------ //
 // ========================================================================= //
 
-
-int main(int argc, char* argv[]) {
-  // Add --color_print=false to argv since we don't want to match color codes.
-  char new_arg[64];
-  char* new_argv[64];
-  std::copy(argv, argv + argc, new_argv);
-  new_argv[argc++] = std::strcpy(new_arg, "--color_print=false");
-  benchmark::Initialize(&argc, new_argv);
-
-  benchmark::ConsoleReporter CR;
-  benchmark::JSONReporter JR;
-  benchmark::CSVReporter CSVR;
-  struct ReporterTest {
-    const char* name;
-    std::vector<TestCase>& output_cases;
-    std::vector<TestCase>& error_cases;
-    benchmark::BenchmarkReporter& reporter;
-    std::stringstream out_stream;
-    std::stringstream err_stream;
-
-    ReporterTest(const char* n,
-                 std::vector<TestCase>& out_tc,
-                 std::vector<TestCase>& err_tc,
-                 benchmark::BenchmarkReporter& br)
-        : name(n), output_cases(out_tc), error_cases(err_tc), reporter(br) {
-        reporter.SetOutputStream(&out_stream);
-        reporter.SetErrorStream(&err_stream);
-    }
-  } TestCases[] = {
-      {"ConsoleReporter", ConsoleOutputTests, ConsoleErrorTests, CR},
-      {"JSONReporter", JSONOutputTests, JSONErrorTests, JR},
-      {"CSVReporter", CSVOutputTests, CSVErrorTests, CSVR}
-  };
-
-  // Create the test reporter and run the benchmarks.
-  std::cout << "Running benchmarks...\n";
-  TestReporter test_rep({&CR, &JR, &CSVR});
-  benchmark::RunSpecifiedBenchmarks(&test_rep);
-
-  for (auto& rep_test : TestCases) {
-      std::string msg = std::string("\nTesting ") + rep_test.name + " Output\n";
-      std::string banner(msg.size() - 1, '-');
-      std::cout << banner << msg << banner << "\n";
-
-      std::cerr << rep_test.err_stream.str();
-      std::cout << rep_test.out_stream.str();
-
-      for (const auto& TC : rep_test.error_cases)
-        TC.Check(rep_test.err_stream);
-      for (const auto& TC : rep_test.output_cases)
-        TC.Check(rep_test.out_stream);
-
-      std::cout << "\n";
-  }
-  return 0;
-}
+int main(int argc, char* argv[]) { RunOutputTests(argc, argv); }

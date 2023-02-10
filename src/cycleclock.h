@@ -23,7 +23,7 @@
 
 #include <cstdint>
 
-#include "benchmark/macros.h"
+#include "benchmark/benchmark.h"
 #include "internal_macros.h"
 
 #if defined(BENCHMARK_OS_MACOSX)
@@ -36,13 +36,18 @@
 // declarations of some other intrinsics, breaking compilation.
 // Therefore, we simply declare __rdtsc ourselves. See also
 // http://connect.microsoft.com/VisualStudio/feedback/details/262047
-#if defined(COMPILER_MSVC) && !defined(_M_IX86)
+#if defined(COMPILER_MSVC) && !defined(_M_IX86) && !defined(_M_ARM64)
 extern "C" uint64_t __rdtsc();
 #pragma intrinsic(__rdtsc)
 #endif
 
-#ifndef BENCHMARK_OS_WINDOWS
+#if !defined(BENCHMARK_OS_WINDOWS) || defined(BENCHMARK_OS_MINGW)
 #include <sys/time.h>
+#include <time.h>
+#endif
+
+#ifdef BENCHMARK_OS_EMSCRIPTEN
+#include <emscripten.h>
 #endif
 
 namespace benchmark {
@@ -65,6 +70,10 @@ inline BENCHMARK_ALWAYS_INLINE int64_t Now() {
   // counter pauses; it does not continue counting, nor does it
   // reset to zero.
   return mach_absolute_time();
+#elif defined(BENCHMARK_OS_EMSCRIPTEN)
+  // this goes above x86-specific code because old versions of Emscripten
+  // define __x86_64__, although they have nothing to do with it.
+  return static_cast<int64_t>(emscripten_get_now() * 1e+6);
 #elif defined(__i386__)
   int64_t ret;
   __asm__ volatile("rdtsc" : "=A"(ret));
@@ -75,13 +84,21 @@ inline BENCHMARK_ALWAYS_INLINE int64_t Now() {
   return (high << 32) | low;
 #elif defined(__powerpc__) || defined(__ppc__)
   // This returns a time-base, which is not always precisely a cycle-count.
-  int64_t tbl, tbu0, tbu1;
-  asm("mftbu %0" : "=r"(tbu0));
-  asm("mftb  %0" : "=r"(tbl));
-  asm("mftbu %0" : "=r"(tbu1));
-  tbl &= -static_cast<int64>(tbu0 == tbu1);
-  // high 32 bits in tbu1; low 32 bits in tbl  (tbu0 is garbage)
-  return (tbu1 << 32) | tbl;
+#if defined(__powerpc64__) || defined(__ppc64__)
+  int64_t tb;
+  asm volatile("mfspr %0, 268" : "=r"(tb));
+  return tb;
+#else
+  uint32_t tbl, tbu0, tbu1;
+  asm volatile(
+      "mftbu %0\n"
+      "mftb %1\n"
+      "mftbu %2"
+      : "=r"(tbu0), "=r"(tbl), "=r"(tbu1));
+  tbl &= -static_cast<int32_t>(tbu0 == tbu1);
+  // high 32 bits in tbu1; low 32 bits in tbl  (tbu0 is no longer needed)
+  return (static_cast<uint64_t>(tbu1) << 32) | tbl;
+#endif
 #elif defined(__sparc__)
   int64_t tick;
   asm(".byte 0x83, 0x41, 0x00, 0x00");
@@ -97,8 +114,30 @@ inline BENCHMARK_ALWAYS_INLINE int64_t Now() {
   // when I know it will work.  Otherwise, I'll use __rdtsc and hope
   // the code is being compiled with a non-ancient compiler.
   _asm rdtsc
+#elif defined(COMPILER_MSVC) && defined(_M_ARM64)
+  // See https://docs.microsoft.com/en-us/cpp/intrinsics/arm64-intrinsics?view=vs-2019
+  // and https://reviews.llvm.org/D53115
+  int64_t virtual_timer_value;
+  virtual_timer_value = _ReadStatusReg(ARM64_CNTVCT);
+  return virtual_timer_value;
 #elif defined(COMPILER_MSVC)
   return __rdtsc();
+#elif defined(BENCHMARK_OS_NACL)
+  // Native Client validator on x86/x86-64 allows RDTSC instructions,
+  // and this case is handled above. Native Client validator on ARM
+  // rejects MRC instructions (used in the ARM-specific sequence below),
+  // so we handle it here. Portable Native Client compiles to
+  // architecture-agnostic bytecode, which doesn't provide any
+  // cycle counter access mnemonics.
+
+  // Native Client does not provide any API to access cycle counter.
+  // Use clock_gettime(CLOCK_MONOTONIC, ...) instead of gettimeofday
+  // because is provides nanosecond resolution (which is noticable at
+  // least for PNaCl modules running on x86 Mac & Linux).
+  // Initialize to always return 0 if clock_gettime fails.
+  struct timespec ts = {0, 0};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<int64_t>(ts.tv_sec) * 1000000000 + ts.tv_nsec;
 #elif defined(__aarch64__)
   // System timer of ARMv8 runs at a different frequency than the CPU's.
   // The frequency is fixed, typically in the range 1-50MHz.  It can be
@@ -108,7 +147,9 @@ inline BENCHMARK_ALWAYS_INLINE int64_t Now() {
   asm volatile("mrs %0, cntvct_el0" : "=r"(virtual_timer_value));
   return virtual_timer_value;
 #elif defined(__ARM_ARCH)
-#if (__ARM_ARCH >= 6)  // V6 is the earliest arch that has a standard cyclecount
+  // V6 is the earliest arch that has a standard cyclecount
+  // Native Client validator doesn't allow MRC instructions.
+#if (__ARM_ARCH >= 6)
   uint32_t pmccntr;
   uint32_t pmuseren;
   uint32_t pmcntenset;
@@ -126,12 +167,43 @@ inline BENCHMARK_ALWAYS_INLINE int64_t Now() {
   struct timeval tv;
   gettimeofday(&tv, nullptr);
   return static_cast<int64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
-#elif defined(__mips__)
+#elif defined(__mips__) || defined(__m68k__)
   // mips apparently only allows rdtsc for superusers, so we fall
   // back to gettimeofday.  It's possible clock_gettime would be better.
   struct timeval tv;
   gettimeofday(&tv, nullptr);
   return static_cast<int64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
+#elif defined(__s390__)  // Covers both s390 and s390x.
+  // Return the CPU clock.
+  uint64_t tsc;
+#if defined(BENCHMARK_OS_ZOS) && defined(COMPILER_IBMXL)
+  // z/OS XL compiler HLASM syntax.
+  asm(" stck %0" : "=m"(tsc) : : "cc");
+#else
+  asm("stck %0" : "=Q"(tsc) : : "cc");
+#endif
+  return tsc;
+#elif defined(__riscv) // RISC-V
+  // Use RDCYCLE (and RDCYCLEH on riscv32)
+#if __riscv_xlen == 32
+  uint32_t cycles_lo, cycles_hi0, cycles_hi1;
+  // This asm also includes the PowerPC overflow handling strategy, as above.
+  // Implemented in assembly because Clang insisted on branching.
+  asm volatile(
+      "rdcycleh %0\n"
+      "rdcycle %1\n"
+      "rdcycleh %2\n"
+      "sub %0, %0, %2\n"
+      "seqz %0, %0\n"
+      "sub %0, zero, %0\n"
+      "and %1, %1, %0\n"
+      : "=r"(cycles_hi0), "=r"(cycles_lo), "=r"(cycles_hi1));
+  return (static_cast<uint64_t>(cycles_hi1) << 32) | cycles_lo;
+#else
+  uint64_t cycles;
+  asm volatile("rdcycle %0" : "=r"(cycles));
+  return cycles;
+#endif
 #else
 // The soft failover to a generic implementation is automatic only for ARM.
 // For other platforms the developer is expected to make an attempt to create
