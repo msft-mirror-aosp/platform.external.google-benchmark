@@ -1,3 +1,7 @@
+# This project was upgraded with external_updater.
+# Usage: tools/external_updater/updater.sh update google-benchmark
+# For more info, check https://cs.android.com/android/platform/superproject/+/main:tools/external_updater/README.md
+
 name: "google-benchmark"
 description: "A library to support the benchmarking of functions, similar to unit-tests."
 third_party {
@@ -9,11 +13,11 @@ third_party {
     type: GIT
     value: "https://github.com/google/benchmark.git"
   }
-  version: "ea5a5bbff491fd625c6e3458f6edd680b8bd5452"
+  version: "v1.8.3"
   license_type: NOTICE
   last_upgrade_date {
-    year: 2021
-    month: 2
-    day: 12
+    year: 2023
+    month: 9
+    day: 22
   }
 }
