@@ -72,7 +72,7 @@ def manual_timing(state):
 
 @benchmark.register
 def custom_counters(state):
-    """Collect cutom metric using benchmark.Counter."""
+    """Collect custom metric using benchmark.Counter."""
     num_foo = 0.0
     while state:
         # Benchmark some code here
@@ -102,7 +102,7 @@ def with_options(state):
 
 @benchmark.register(name="sum_million_microseconds")
 @benchmark.option.unit(benchmark.kMicrosecond)
-def with_options(state):
+def with_options2(state):
     while state:
         sum(range(1_000_000))
 
