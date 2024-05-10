@@ -38,6 +38,7 @@ def sum_million(state):
     while state:
         sum(range(1_000_000))
 
+
 @benchmark.register
 def pause_timing(state):
     """Pause timing every iteration."""
@@ -72,7 +73,7 @@ def manual_timing(state):
 
 @benchmark.register
 def custom_counters(state):
-    """Collect cutom metric using benchmark.Counter."""
+    """Collect custom metric using benchmark.Counter."""
     num_foo = 0.0
     while state:
         # Benchmark some code here
@@ -85,7 +86,9 @@ def custom_counters(state):
     # Set a counter as a rate.
     state.counters["foo_rate"] = Counter(num_foo, Counter.kIsRate)
     #  Set a counter as an inverse of rate.
-    state.counters["foo_inv_rate"] = Counter(num_foo, Counter.kIsRate | Counter.kInvert)
+    state.counters["foo_inv_rate"] = Counter(
+        num_foo, Counter.kIsRate | Counter.kInvert
+    )
     # Set a counter as a thread-average quantity.
     state.counters["foo_avg"] = Counter(num_foo, Counter.kAvgThreads)
     # There's also a combined flag:
@@ -102,7 +105,7 @@ def with_options(state):
 
 @benchmark.register(name="sum_million_microseconds")
 @benchmark.option.unit(benchmark.kMicrosecond)
-def with_options(state):
+def with_options2(state):
     while state:
         sum(range(1_000_000))
 
