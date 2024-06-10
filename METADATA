@@ -8,13 +8,13 @@ third_party {
   license_type: NOTICE
   last_upgrade_date {
     year: 2024
-    month: 5
-    day: 1
+    month: 6
+    day: 7
   }
   homepage: "https://github.com/google/benchmark"
   identifier {
     type: "Git"
     value: "https://github.com/google/benchmark.git"
-    version: "bc946b919cac6f25a199a526da571638cfde109f"
+    version: "v1.8.4"
   }
 }
