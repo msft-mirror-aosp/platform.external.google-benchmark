@@ -50,6 +50,7 @@ cc_defaults {
 // For benchmarks that define their own main().
 cc_library_static {
     name: "libgoogle-benchmark",
+    cmake_snapshot_supported: true,
     defaults: ["libgoogle-benchmark-defaults"],
     exclude_srcs: [
         "src/benchmark_main.cc",
