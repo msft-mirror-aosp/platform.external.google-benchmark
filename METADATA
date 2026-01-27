@@ -15,6 +15,7 @@ third_party {
   identifier {
     type: "Git"
     value: "https://github.com/google/benchmark.git"
-    version: "v1.9.0"
+    version: "d35dc37d9fac0c66a4fe17ce6571fc5625a9e3ee"
+    closest_version: "v1.9.0"
   }
 }
